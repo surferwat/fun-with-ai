@@ -86,3 +86,90 @@ The test set is the portion of the dataset used to evaluate the final model’s 
 
 In the tutorial, the proportion of the dataset used for training, validation, and testing are 80\%, 10\%, and 10\% respectively. These proportions result in 32033, 3203, and 3204 examples (i.e., bigrams derived from words) respectively,
 
+## building_makemore_part3.ipynb
+
+This is the python code that I wrote following Andrej's tutorial, "Building makemore Part 3: Activations & Gradients, BatchNorm". The reference YouTube video: https://www.youtube.com/watch?v=P6sfmUTpUmc
+
+Here are notes on key concepts covered in the video:
+
+### Saturated tanh
+tanh refers to the hyperbolic tangent function. 
+
+In the context of neural networks, tanh serves as an activation function that introduces non-linearity into a neuron’s output. The input to the tanh activation function is typically the weighted sum of inputs to a neuron, often denoted as z. This can be expressed mathematically as: z = w1x1+w2x2+…+wnxn+b where wi are the weights, xi are the input features, and b is the bias term. As Andrej, describes, tanh is a squashing function - it takes arbitrary numbers and squashes them into a range in -1 and 1, doing so smoothly.
+
+Saturated tanh refers to the behavior of the hyperbolic tangent activation function when its input values are far from zero, particularly in the positive or negative direction. The tanh function outputs values between -1 and 1, and when the input is large (either positive or negative), the function approaches its asymptotic values of -1 or 1. In these regions, the gradient (or derivative) of the function becomes very small, leading to what is known as “saturation”. When neurons operate in this saturated region, small changes in input can result in negligible changes in output, making it difficult for the network to learn effectively during backpropogation.
+
+In the tutorial, the preactivations that feed into the tanh function are broadly distributed taking values in a range between -15 and 15. This is why the output values can take on extreme values near -1 and 1. The preactivations are represented by the variable named “hpreact”.
+
+### Initializing scales (Kaiming)
+Initializing scales using Kaiming initialization (also known as He initialization) is a method for setting the initial weights of neural network layers. Proposed by Kaiming He and his colleagues, this technique helps mitigate the vanishing and exploding gradient problems often encountered during the training of deep neural networks.
+
+In the tutorial, Andrej runs through an example using the following code block:
+
+x = torch.randn(1000, 10)
+w = torch.randn(10, 200) / 10**0.5
+y = x @ w
+
+x is the input tensor (representing pre-activations) with a shape of (1000,10). 1000 represents the number of samples (or datapoints), indicating that we are generating a dataset with 1000 individual samples. 10 represents the number of features (or variables) for each sample, meaning each of the 1000 samples has 10 attributes or measurements. x is initialized with values drawn from a standard normal distribution (mean=0, variance=1) giving it a standard deviation of std(x) = 1.
+
+w is the weight matrix that connects the input features to the output features in a layer of a neural network. w is initialized with values from a standard normal distribution. The resulting distribution of y will depend on both the input distribution and the variance of the weights.
+
+Since y = x @ w, the variance of the output y can be influenced by the weights. When performing the multiplication, if the weights have a variance of 1 (which they do in w = torch.randn(10,200)), the variance of the output becomes: var(y) = var(x)*var(w)*n_in where n_in is the number of input features (10 in this case).
+
+By dividing the weights w by 10**0.5, you effectively scale the variance of the weights down. This adjustment helps keep the overall variance of the output y more consistent with that of the input x: var(w) = 1/10 => var(y) ≈ var(x). This scaling ensures that the output distribution remains Gaussian and does not become excessively spread out.
+
+### Batch normalization
+Batch normalization is a technique used in training deep neural networks, including multilayer perceptrons, to improve their performance and stability. During training, the input to each layer can vary significantly, which can lead to issues such as slow convergence or even instability. Batch normalization normalizes the output of a layer (activations) so that they have a mean of zero and a standard deviation of one. 
+
+For each mini-batch of data, batch normalization computes the mean and variance of the activations. The activations are then normalized using these statistics. After normalization, the layer applies a linear transformation, scaling and shifting the normalized values using learnable parameters (gamma and beta). This allows the network to retain the capacity to model complex functions.
+
+In the tutorial, the following code block is the implementation of batch normalization.
+
+hpreact = embcat @ W1 + b1 #hidden layer pre-activation
+hpreact = bngain * (hpreact - hpreact.mean(0, keepdim=True))/ hpreact.std(0, keepdim=True) + bnbias
+
+“hpreact = embcat @ W1 + b1” computes the pre-activation of the hidden layer by multiplying the input embeddings (embcat) with the weight matrix (W1) and adding the bias (b1)
+
+“hpreact.mean(0, keepdim=True)” calculates the mean of the pre-activation values along the first dimension (batch dimension), keeping the dimensions for broadcasting. In this context, the first dimension corresponds to the number of samples. For a tensor shape of (N,D) where N is the number of samples and D is the number of features. Mean across first dimension computes the mean for each feature across all samples resulting in a tensor of shape (1,D). In contrast, mean across the 2nd dimension computes the mean across each sample for all features, resulting in a tensor shape of (N,1).
+
+“hpreact.std(0, keepdim=True)” calculate the standard deviation of the pre-activation values along the first dimension (batch dimension), also keeping the dimensions for broadcasting.
+
+“bngain = torch.ones((1, n_hidden))” initializes the scale parameter (gamma) for batch normalization with ones, shape (1, n_hidden). By initializing gamma to ones, you effectively start with an identity transformation for the normalized activations. This means at the beginning of training the normalized activations will be unchanged.
+
+“bnbias = torch.zeros((1, n_hidden))” initializes the shift parameter (beta) for batch normalization with zeros, shape (1, n_hidden). By initializing gamma to zeros, you effectively start with an identity transformation for the normalized activations. This means at the beginning of training the normalized activations will be unchanged.
+
+### Forward pass activation statistics
+Forward pass activation statistics involve creating histograms of the outputs from the forward pass activations, specifically those from the tanh function. These histograms provides a visual representation to identify potentially problematic patterns, such as skewness (whether the distribution leans towards low or high values), modality (number of peaks), or saturation (if most values are pushed to extremes).
+
+In the tutorial, here is the code block that creates the histograms:
+plt.figure(figsize=(20,4)) #width and height of the plot
+legends= [] 
+for i, layer in enumerate(layers[:-1]): #note: exclude the output layer
+	if isinstance(layer, Tanh): 
+		t = layer.out 
+		print(‘layer %d (%10s): mean +.2f, std %.2f, saturated: %.2f%%’ % (i, layer.__class__.__name__, t.mean(), t.std(), (t.abs() > 0.97).float().mean()*100)
+		hy, hx = torch.histogram(t, density=True) 
+		plt.plot(hx[:-1].detach(), hy.detach()) 
+		legends.append(f'layer {i} ({layer.__class__.__name__}') 
+plt.legend(legends); 
+plt.title('activation distribution')
+
+### Backward pass gradient statistics
+Backward pass gradient statistics involve creating histograms of the gradients computed during the backward pass of a neural network. These histograms help identify how gradients distributed - whether they are predominantly small, large, or concentrated around particular values.
+
+In the tutorial, histograms are created for each layer (except the output layer) allowing for a comparison across layers. The comparison provide insights into how effectively different parts of the network are learning and whether any adjustments are necessary. The histograms created were similar, indicating that the gradients were consistent across layers which is the desired outcome.
+
+In the tutorial, here is the code block that creates the histograms:
+plt.figure(figsize=(20,4)) #width and height of the plot
+legends= [] 
+for i, layer in enumerate(layers[:-1]): #note: exclude the output layer
+	if isinstance(layer, Tanh): 
+		t = layer.out.grad 
+		print(‘layer %d (%10s): mean +.2f, std %.2f, saturated: %.2f%%’ % (i, layer.__class__.__name__, t.mean(), t.std(), (t.abs() > 0.97).float().mean()*100)
+		hy, hx = torch.histogram(t, density=True) 
+		plt.plot(hx[:-1].detach(), hy.detach()) 
+		legends.append(f'layer {i} ({layer.__class__.__name__}') 
+plt.legend(legends); 
+plt.title(‘gradient distribution)
+
+
