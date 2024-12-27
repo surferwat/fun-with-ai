@@ -176,3 +176,104 @@ plt.title(‘gradient distribution)
 
 This is the python code that I wrote following Andrej's tutorial, "Building makemore Part 4: Becoming a Backprop Ninja". The reference YouTube video: https://www.youtube.com/watch?v=q8SA3rM6ckI
 
+## building_makemore_part5.ipynb
+
+This is the python code that I wrote following Andrej's tutorial, "Building makemore Part 5: Building a WaveNet". The reference YouTube video: https://www.youtube.com/watch?v=t3YJ5hKiMQ0
+
+Here are notes on key concepts covered in the video:
+
+### torch.nn
+torch.nn (short for Neural Networks) is a submodule that provides tools for building, training, and managing neural networks. It contains pre-defined layers, loss functions, optimizers, and other utilities that make it easier to implement and experiment with deep learning models.
+
+### torch.nn.Container
+Containers refer to the data structures that hold and manage collections of data or models. These are not special, unique objects defined in PyTorch, but rather general terms for classes or modules that help organize, store, and manipulate data efficiently in machine learning workflows.
+
+This tutorial focuses on `torch.nn.Sequential`, which is a container in PyTorch. Modules will be added to it in the order they are passed in the constructor. This container allows you to define a neural network by arranging layers (or modules) one after the other in a straight sequence, where the out output of one layer is passed directly as the input to the next layer (i.e., stack layers in a linear fashion).
+
+The code block is a simplified implementation of PyTorch’s Sequential:
+```
+class Sequential:
+	def __init__(self, layers):
+		self.layers = layers
+	
+	def __call__(self, x):
+		for layer in self.layers:
+			x = layer(x)
+		self.out = x
+		return self.out
+
+	def parameters(self):
+		#get parameters of all layers and stretch them out into one list
+		return [p for layer in self.layers for p in layer.parameters()]
+```
+
+### WaveNet
+A WaveNet is a deep neural network architecture designed for generating raw audio waveforms. It was introduced by DeepMind in 2016 and is particularly known for producing highly realistic, human-like speech and other audio signals. Unlike traditional speech synthesis methods that use pre-recorded sound units (like phonemes or audio frames), WaveNet directly generates audio samples, working at the level of individual sound wave points.
+
+In this tutorial, the concept of progressive fusion is introduced. The process beings with two characters being fused into bigram representations. These bigrams are then combined into four-character level chunks, and this process is repeated in a tree-like hierarchical manner. The key idea is to gradually fuse information from previous context as the network depends. At each level, consecutive elements-such as pairs of characters, bigrams, and four-grams - are progressively fused together. This approach helps to model increasingly complex dependencies as the network grows deeper.
+
+### Batchnorm1d bug
+The bug occurs when applying batch normalization to an input tensor with the shape (32, 4, 68) in a neural network model. Here's a breakdown of the issue
+
+The input tensor has shape (32, 4, 68): 32 is the batch size; 4 could be a sequence length or a feature dimension; 68 represents the number of channels (features).
+
+Here is the the implementation for when calculating the mean and variance for normalization:
+``` emean = e.mean(0, keepdim=True)  # Mean across batch (dimension 0)
+evar = e.var(0, keepdim=True)    # Variance across batch (dimension 0)
+ehat = (e - emean) / torch.sqrt(evar + 1e-5)
+```
+ This produces `emean` and `evar` with the shape (1, 4, 68), which seems correct because we want to maintain statistics per channel (68 channels).
+The bug arises because batch normalization is incorrectly treating the second dimension (4) as independent features instead of treating it as part of the batch. This means that statistics (mean and variance) are being calculated separately for each of the 4 positions, which is not what we want. Instead, we want to calculate the statistics across both the batch dimension (i.e., 32) and the 4th dimension (sequence length or feature dimension) together, ensuring that the normalization is applied correctly across the channels.
+ The fix is to treat the second dimension (i.e., 4) as part of the batch and apply normalization accordingly. This can involve flattening the dimensions or applying the normalization across the appropriate axes so that the statistics are shared across the 68 channels, not the separate positions in the 4th dimension.
+
+### Experimental harness
+Experimental harness refers to a structured framework or environment to run controlled experiments, test hypotheses, and track results effectively.
+
+In the context of machine learning or deep learning, this could involve: data collection and preprocessing pipelines; model tracking; evaluation metrics; and reproducibility.
+
+### Dilated causal convolutions
+In this tutorial, convolutions are used as a more efficient way to process sequences, which is inspired by the WaveNet paper. The main idea is that while convolutions make the model more efficient, they don’t fundamentally change the model itself.
+
+Let’s take the name “diondre” as an example. This name has 7 letters, and in the model, each letter is treated as an independent example. So, you have 8 separate inputs for the model, one for each letter in the name, including the starting position and the final period ( . ) added at the end.
+
+Here is the code implementation:
+```
+for x,y in zip(Xtr[7:15], Ytr[7:15]):
+	print(‘’.join(itos[ix.item()] for ix in x), ‘—>’, itos[y.item()])
+
+…….. —> d
+…….d —> i
+……di —> o
+…..dio —> n
+….dion —> d
+…diond —> r
+..diondr —> e
+.diondre —> .
+```
+
+The model processes the input sequence step-by-step. For example: 
+The first row (input `d`) predicts the output `d`
+The second row (input `di`) predicts the output `i`
+The third row (input `dio`) predicts the output `o`
+And so on
+
+In the code: 
+`Xtr[7:15]` represents 8 different sequences of the name “diondre.”
+`Ytr[7:15]` contains the corresponding targets (the next letter in the sequence for each input)
+
+Now, you can forward a single example (i.e., one row) through the model like this:
+``` 
+logits = model(Xtr[[7]]) #forward a single example
+```
+
+This would output the predictions for just the first row. If you want to do this for all 8 rows, you can look over them:
+```
+logits = torch.zeros(8,27)
+for i in range(8):
+	logits[i] = model(Xtr[[7 + i]]) # Forward each row through the model
+```
+
+However, this loop is relatively inefficient since each row is processed independently in Python. What convolutions allow you to do is “slide the model” over the input sequence all at once, instead of looping through each row manually. This sliding operation happens inside a CUDA kernel (a specialized piece of code that runs on the GPU), making the process much faster. In simple terms, instead of using a for-loop to apply the model to each input row one-by-one, the convolution does this sliding operation in a highly optimized way, which saves time and computational resources.
+
+In the context of the “diondre” example, dilated causal convolutions can be thought of as a way to apply the model to all 8 rows at once. The “dilated” part of dilated convolutions means that the model skips over some positions, allowing it to capture patterns over a wider range of the sequence without increasing the number of parameters.
+
