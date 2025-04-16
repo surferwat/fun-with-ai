@@ -394,7 +394,7 @@ B,T,C = 4,8,32 # batch, time, channels
 x = torch.randn(B,T,C)
 ```
 
-# let’s see a single Head perform self-attention
+Let’s see a single Head perform self-attention.
 ```
 head_size = 16
 key = nn.Linear(C, head_size, bias=False)
