@@ -595,3 +595,52 @@ def call__(self, x):
 			self.running_var = (1 - self.momentum) * self.running_var + self.momentum * xvar
 	return self.out
 ```
+
+## building_gpt_tokenizer.ipynb
+
+### Unicode code points
+A unicode code point is a unique number assigned to each character in the Unicode Standard, which is a system designed to represent text from all the world’s writing systems in a consistent way. Version 16.0 of the standard defines 154998 characters and 168 scripts used in various ordinary, literary, academic, and technical contexts.
+
+### Unicode byte encodings
+Unicode byte encodings refer to how Unicode characters (which are abstract code points) are represented as bytes for storage or transmission. The most common Unicode encodings are: UTF-8, UTF-16, UTF-32. 
+
+UTF-8
+1-4 bytes per character
+Variable length
+ASCII compatible
+Commonly used for web, files
+
+UTF-16
+2 or 4 bytes
+Variable length
+ASCII incompatible
+Commonly used for windows, java
+
+UTF-32
+4 bytes
+Fixed length
+ASCII incompatible
+Commonly used for internal use, simplicity
+
+### Byte Pair Encoding (BPE)
+BPE is an algorithm, first described in 1994 by Philip Gage, for encoding strings of text into smaller strings by creating and using a translation table. The original version of the algorithm focused on compression. It replaces the highest-frequency pair of bytes with a new byte that was not contained in the initial dataset. A lookup table of the replacement is required to rebuild the initial dataset.
+
+Example: aaabdaaabac. Let Z=aa. aaabdaaabac => ZabdZabac. Let Y = ab.  ZabdZabac => ZYdZYac. Let X = ZY. ZYdZYac => XdXac. https://en.wikipedia.org/wiki/Byte_pair_encoding
+
+tiktoken
+Tiktoken is a fast BPE tokenizer for use with OpenAI’s models.
+
+### Special Tokens
+In the context of tokenization for machine learning models, particularly in natural language processing (NLP), the idea of special tokens extends beyond the usual linguistic tokens that come from raw text and subword merging techniques like BPE. Special tokens are a unique set of tokens that have specific roles within the token stream and are used to manage the structure of the data, as well as facilitate certain functionalities for models like GPT-3, BERT, and other transformer-based architectures. Special tokens are inserted into the token stream to provide context and structure that the model can interpret in a way that is meaningful for a particular task. They help the model differentiate between different sections of input, mark certain actions, or indicate the start or end of specific sequences. Types of special tokens include: classification token (CLS), separator token (SEP), padding token (PAD), unknown token (UNK), mask token (MASK), beginning of sentence (BOS), end of sentence (EOS), among other custom tokens.
+
+### SentencePiece
+SentencePiece is an unsupervised text tokenizer and detokenizer mainly for Neural Network-based text generation systems where the vocabulary size is predetermined prior to the neural model training. It is particularly well-suited for languages that don’t use spaces to separate words (like Japanese) and for neural network models that require subword-level tokenization (like BERT, T5, or GPT variants).
+
+### Prompt Compression
+Prompt compression refers to techniques used to reduce the size or length of a prompt (input text) sent to a language model - without significantly degrading the quality or accuracy of the model’s output. This is important because: language models have input length limits (measured in tokens); smaller prompts are faster and cheaper to process; compressing prompts can help maintain context over longer interactions or documents. In the tutorial, Andrej introduces Gist Tokens in the context of prompt compression. In systems like OpenAI’s memory features or retrieval-augmented generation (RAG), gist tokens are generated as short textual or semantic representations of longer documents or conversations.
+
+### Multimodal tokenization
+The process of converting inputs from different modalities - like text, images, audio, or video - into a unified format (usually tokens) that can be processed by a multimodal AI model. Why it’s important? Most large AI models operate on sequences of tokens. For multimodal models like GPT -4o or CLIP, each input type (e.g., a word or a pixel patch) is converted into tokens that the model can process in the same computational framework.
+
+### Vector quantization
+A technique used to compress data by mapping continuous input vectors (like image or audio features) to a limited set of representative vectors called codebook entries. It’s widely used in areas like signal compression, image processing, and more recently, in machine learning models like Vector Quantized Variational Autoencoder (VQ-VAE) and large multimodal models.
