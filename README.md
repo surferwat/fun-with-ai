@@ -768,6 +768,7 @@ Step 3: Prepare the State Dicts
 sd = model.state_dict()
 sd_keys = sd.keys()
 sd_keys = [ k for k in sd_keys if not k.endswith(‘.attn.bias’)] # Remove buffer mask
+```
 
 This filters out non-weight tensors like ‘.attn.bias’, which aren’t present in Hugging Face’s weights.
 
