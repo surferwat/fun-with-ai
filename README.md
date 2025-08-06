@@ -1,5 +1,16 @@
 # fun with ai
 
+## TOC
+- [building_micrograd.ipynb](#building_microgradipynb)
+- [building_makemore.ipynb](#building_makemoreipynb)
+- [building_makemore_part2.ipynb](#building_makemore_part2ipynb)
+- [building_makemore_part3.ipynb](#building_makemore_part3ipynb)
+- [building_makemore_part4.ipynb](#building_makemore_part4ipynb)
+- [building_makemore_part5.ipynb](#building_makemore_part5ipynb)
+- [building_gpt.ipynb](#building_gptipynb)
+- [building_gpt_tokenizer.ipynb](#building_gpt_tokenizeripynb)
+- [building_nanogpt.py](#building_nanogptpy)
+
 ## building_micrograd.ipynb
 
 This is the python code that I wrote following Andrej's tutorial, "The spelled-out intro to neural networks and backpropagation: building micrograd". The reference YouTube video: https://www.youtube.com/watch?v=VMj-3S1tku0
@@ -646,7 +657,7 @@ The process of converting inputs from different modalities - like text, images, 
 A technique used to compress data by mapping continuous input vectors (like image or audio features) to a limited set of representative vectors called codebook entries. It’s widely used in areas like signal compression, image processing, and more recently, in machine learning models like Vector Quantized Variational Autoencoder (VQ-VAE) and large multimodal models.
 
 
-## reproducing gpt2 (124M)
+## building_nanogpt.py
 
 This is the python code that I wrote following Andrej's tutorial, "Let's reproduce GPT-2 (124M)". The reference YouTube video: https://www.youtube.com/watch?v=l8pRSuU81PU
 
@@ -711,7 +722,9 @@ In this implementation, we work with a sequence of tokens - up to 1024 of them. 
 
 All of this is functionally equivalent to the multi-headed attention implementation we’ve seen before, but it’s written in a more efficient and compact PyTorch style. 
 
-A note on naming: variable names like `c_attn` match those used in Hugging Face’s transformer library. This naming consistency allows us to load pertained weights from Hugging Face directly, ensuring compatibility.  At this stage, the GPT-2 implementation is complete. The entire model is under ~100 lines of PyTorch code, compared to ~2000 lines in Hugging Face’s full version. We can now load the weights and proceed to text generation using our own simplified model. 
+A note on naming: variable names like `c_attn` match those used in Hugging Face’s transformer library. This naming consistency allows us to load pertained weights from Hugging Face directly, ensuring compatibility.
+
+At this stage, the GPT-2 implementation is complete. The entire model is under ~100 lines of PyTorch code, compared to ~2000 lines in Hugging Face’s full version. We can now load the weights and proceed to text generation using our own simplified model. 
 
 ### Class GPTConfig
 The GPTConfig class defines the architectural hyperparamters of the GPT-2 model and ensures that the model being implemented matches the specifications of the GPT-2 small variant (124M parameters). These configuration settings are essential for constructing the transformer layers and defining the overall structure of the model.
@@ -854,7 +867,8 @@ To train the model, we need a a dataset. Andrej recommends using the Tiny Shakes
 
 ### Tokenizing the Dataset
 To prepare the data for training, we need to tokenize it using the same encoding that GPT-2 uses. This is done with the `tiktoken` library, which provides access to the GPT-2 tokenizer. This step converts the raw text into a sequence of integer tokens, which are the input format required for training the model.
- Here’s how to encode the dataset:
+
+Here’s how to encode the dataset:
 ```
 import  tiktoken
 enc = tiktoken.get_encoding(‘gpt2’)
@@ -918,6 +932,7 @@ In this section, Andrej points out a subtle but important detail about GPT-2’s
 # These tensors have the same shape:
 print(sd_hf[“lm_head.weight”].shape) # [50257, 768] - the output projection (logits layer)
 print(sd_hf[“transformer.wte.weight”].shape) # [50257, 768] - the token embedding layer
+```
 
 But more than just having the same shape, they are identical at the memory level:
 
