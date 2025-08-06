@@ -644,3 +644,570 @@ The process of converting inputs from different modalities - like text, images, 
 
 ### Vector quantization
 A technique used to compress data by mapping continuous input vectors (like image or audio features) to a limited set of representative vectors called codebook entries. It’s widely used in areas like signal compression, image processing, and more recently, in machine learning models like Vector Quantized Variational Autoencoder (VQ-VAE) and large multimodal models.
+
+
+## reproducing gpt2 (124M)
+
+This is the python code that I wrote following Andrej's tutorial, "Let's reproduce GPT-2 (124M)". The reference YouTube video: https://www.youtube.com/watch?v=l8pRSuU81PU
+
+Here are notes on key concepts covered in the video:
+
+### Implementing the GPT-2 nn.Module
+GPT-2 is a decoder-only Transformer, meaning it does not include an encoder or cross-attention layers, which are typically used in encoder-decoder architectures. There are two key architectural differences from the original Transformer design (as presented in the GPT paper):
+1. LayerNorm Placement: In GPT-2, Layer Normalization is applied before the attention and MLP blocks (this is known as Pre-LN), unlike the original Post-LN setup where normalization is done afterward.
+2. Additional Final LayerNorm: GPT-2 includes an extra LayerNorm at the end of the model (after all Transformer blocks), which is not present in the original Transformer architecture.
+
+### Class GPT
+This class defines configuration settings and module structures used throughout the GPT-2 architecture. Below are the key components it utilizes: 
+
+nn.ModuleDict()
+nn.ModuleDict is a PyTorch container that stores submodules in a dictionary-like structure, allowing access via string keys. It’s useful for organizing multiple submodules (like layers or blocks) in a way that is both easy to reference and compatible with `nn.Module` parameter tracking (so everything is properly registered and moves to the correct device). In the GPT-2 implementation, it can be used to store components like attention or MLP blocks, especially if you want to access them by name.
+
+nn.Embedding()
+`nn.Embedding` is essentially a learnable lookup table. It’s a wrapper around a tensor where each row corresponds to the embedding vector for a specific token ID. When you index into it with a batch of token IDs, it returns their corresponding embedding vectors. In GPT-2, `nn.Embedding` is used to: Convert token IDs into input embeddings; Optionally include positional embeddings to encode the position of each token in the sequence. This allows the model to start with dense vector representations of tokens instead of raw IDs.
+
+nn.ModuleList()
+`nn.ModuleList` is a Python list specifically for storing submodules in PyTorch. It behaves like a regular list, but it ensures that all the layers you add are registered as part of the model, so PyTorch can track their parameters, move them to the correct device, and include them in back propagation. In GPT-2, it’s commonly used to hold the sequence of Transformer blocks, so you can loop over them or access specific layers by index during the forward pass. 
+
+nn.LayerNorm()
+`nn.LayerNorm` applies layer normalization, which normalizes the inputs across the feature dimension - stabilizing training and helping gradients flow better. As used in GPT-2: It normalizes each token’s embedding independently across its features. It’s applied in a pre-norm setup, meaning it comes before the attention and MLP blocks (unlike the original Transformer, which used post-norm). This ensures consistent input scale for the attention and MLP submodules. “It’s just standard LayerNorm - nothing fancy.”
+
+nn.Linear()
+`nn.Linear` is a fully connected (dense) layer that applies a linear transformation to the its input: output = input @ weight.T + bias. In the GPT-2 model: It’s used in both the attention mechanism (to project queries, keys, values, and outputs). And in the MLP block (for the two-layer feedforward network with a GELU nonlinearity in between). These linear layers give GPT-2 its ability to learn rich, high-dimensional transformations. “It’s just a matrix multiply + bias - nothing too magical.”
+
+### Class Block
+The Block class defines a core component of the Transformer architecture. In the `forward(self, x)` method, the input tensor `x` is processed in the following sequence:
+1. Layer Normalization
+2. Self-Attention
+3. Layer Normalization (again)
+4. Feedforward Neural Network (MLP)
+5. Residual Connections
+
+While this might look different from the original GPT paper - where layer normalization is applied after attention or feedforward layers - this variation reflects a more modern design. Specifically, by applying normalization before attention and MLP layers (a pattern known as “Pre-LN”), we can maintain a clean residual stream throughout the network.
+
+This design has practical benefits. Because the residual pathway remains unmodified by normalization or other operations, gradients from the output layer can flow directly back to the input tokens. If you recall from micrograd, addition in the residual path distributes gradients equally to both branches during back propagation. This means that residual connections act as clean gradient highways, allowing stable training and deeper networks. 
+
+In summary, this block structure ensures that both the signal and its gradients can flow efficiently through the model - from input tokens to output predictions and back - enabling powerful learning dynamics.
+
+### Class MLP
+The MLP class (Multi-Layer Perceptron) implements a simple feedforward network, commonly used in transformer architectures. It’s relatively straightforward. In the __init__(self, config) method, the layers are constructed as follows:
+1. `self.c_fc`: a linear projection layer (nn.Linear) that expands the dimensionality of the input.
+2. `self.gelu`: a non-linearity, specifically the GELU (Gaussian Error Linear Unit) which resembles a smoother version of ReLU.
+3. `self.c_proj`: Another linear layer that projects the expanded hidden dimension back down to the original size.
+
+The GELU activation behaves similarly to ReLU but doesnt have a hard zero threshold; instead, it transitions smoothly. This function was introduced in the Gaussian Error Linear Units paper. Historically, an approximate version of GELU was used (especially in early models like BERT and GPT) due to performance issues evaluating the exact erf function in TensorFlow at the time.
+
+Daniel Henrycks (the author of GELU) discussed this on GitHub, explaining that the approximation was a practical necessity back then. Today, thanks to improved libraries and hardware, the exact GELU can be used without performance concerns, and the difference in results between the approximate and exact versions is negligible.
+
+### Class CausalSelfAttention
+This class implements multi-head self-attention, which is more sophisticated than standard attention. In earlier tutorials, we saw how multi-head attention works by running several attention “heads” in parallel and then concatenating their outputs. This same mechanism is implemented here, but instead of using multiple distinct attention modules, it’s all done within a single efficient module using tensor operations - what Andrej calls “tensor gymnastics.” 
+
+In this implementation, we work with a sequence of tokens - up to 1024 of them. Each token at this point is transformed into three vectors: query (`Q`), key (`K`), and value (`V`). The attention mechanism relies on computing similarity between queries and keys to determine how much focus each token should give to others in the sequence. To compute this efficiently, we first compute a combined QKV tensor in one projection using `c_attn`, and then split it into `Q`, `K`, and `V`. To parallelize across multiple attention heads, we reshape and transpose the tensors such that the head dimension `nh` becomes part of the batch dimension. This enables efficient computation over all heads in parallel using PyTorch’s broadcasting and batch operations. The core steps are: 
+1. Compute dot products between queries and keys to get attention scores. 
+2. Apply a causal mask to enforce autoregressive behavior (each token can only attend to past or current tokens, not future ones). 
+3. Normalize the scores using softmax. 
+4. Use the attention weights to compute a weighted sum over the value vectors. 
+5. Recombine the multiple heads back together using `transpose` and contiguous().view() operations.
+
+All of this is functionally equivalent to the multi-headed attention implementation we’ve seen before, but it’s written in a more efficient and compact PyTorch style. 
+
+A note on naming: variable names like `c_attn` match those used in Hugging Face’s transformer library. This naming consistency allows us to load pertained weights from Hugging Face directly, ensuring compatibility.  At this stage, the GPT-2 implementation is complete. The entire model is under ~100 lines of PyTorch code, compared to ~2000 lines in Hugging Face’s full version. We can now load the weights and proceed to text generation using our own simplified model. 
+
+### Class GPTConfig
+The GPTConfig class defines the architectural hyperparamters of the GPT-2 model and ensures that the model being implemented matches the specifications of the GPT-2 small variant (124M parameters). These configuration settings are essential for constructing the transformer layers and defining the overall structure of the model.
+`block_size: int = 1024` This sets the maximum context length (i.e., the number of tokens) that the model can attend to. Each input sequence can be up to 1024 tokens long. This value controls how much “memory” the model has of previous tokens in a sequence.
+`vocab_size: int = 50257` This defines the number of unique tokens the model can recognize and output. GPT-2 uses byte pair encoding (BPE) and the vocabulary consist of 50,000 BPE merges plus additional byte-level tokens (0-255) and one special token, <|endoftext|> used to denote document boundaries or indicate where text generation should begin.
+`n_layer: int = 12` The number of transformer blocks (also called layers). Each block contains components such as multi-head self-attention and feed-forward neural networks. Increasing the number of layers increases the depth and representation capacity of the model.
+`n_head: int = 12` The number of attention heads used in the multi-head self-attention mechanism. Multiple heads allow the model to attend to different parts of the input sequence in parallel, capturing richer contextual relationships.
+`n_embd: int = 768` The size of the token embeddings and also the dimensionality of all hidden layers in the transformer. It defines the width of the model. All layers (input embeddings, attention mechanisms, feed-forward networks) operate in this 768-dimensional space.
+
+Load params from Hugging Face and initialize GPT class with those parameters
+```
+@classmethod
+def from_pretrained(cos, model_type):
+```
+This method supports four model variants:
+- `gpt2` (124M parameters)
+- `gpt2-medium` (350M)
+- `gpt2-large` (774M)
+- `gpt2-xl` (1558M)
+Step 1: Load Model Hyperparamters
+First, the corresponding hyper parameters for each GPT-2 variant are set in a dictionary:
+```
+config_args = {
+	‘gpt2’: dict(n_layer=12, n_head=12, n_embd=768), #124M
+	‘gpt2-medoum’: dict(n_layer=24, n_head=16, n_embd=1024), #350M
+	‘gpt2-large: dict(n_layer=36, n_head=20, n_embd=1280), #774M
+	‘gpt2-xl’: dict(n_layer=48, n_head=25, n_emdb=1600), #1558M
+}[model_type]
+config_args[‘vocab_size’] = 50257 # always 50257 for GPT model checkpoints
+config_args[‘block_size’] = 1024 # always 1024 for GPT model checkpoints
+```
+Step 2: Create a minGPT Model with the same config
+```
+config = GPTConfig(**config_args)
+model = GPT(config)
+```
+Now `model` is a randomly initialized minGPT model matching the chosen GPT-2 variant.
+
+Step 3: Prepare the State Dicts
+```
+sd = model.state_dict()
+sd_keys = sd.keys()
+sd_keys = [ k for k in sd_keys if not k.endswith(‘.attn.bias’)] # Remove buffer mask
+
+This filters out non-weight tensors like ‘.attn.bias’, which aren’t present in Hugging Face’s weights.
+
+Step 4: Handle Transposed Weights
+A key annoyance is that some Hugging Face weights are stored with their dimensions transposed. These must be manually identified and transposed before loading.
+
+```
+transposed = [
+    'attn.c_attn.weight',
+    ‘attn.c_proj.weight',
+    …
+]
+assert len(sd_keys_hf) == length(sd_keys) …
+for k in sd_keys_hf: …
+```
+Step 5: Load the weights
+```
+model = GPT.from_pretrained(‘gpt2’)
+print(“didn’t crash yay!”)
+```
+
+### Add `forward()` to GPT class
+Before we can generate text, we need to define how the model performs a forward pass. This is implemented in the `forward()` method of the GPT class. 
+Input: The method takes idx, a tensor of token indices with shape `(B,T)` where: `B` is the batch size (number of sequences); `T` is the sequence length (a number of tokens per sequence). 
+Step 1 Validation: We assert that `T` does not exceed the model’s block_size. This ensures the input fits within the maximum context window the model was trained on . 
+Step 2 Embedding Layers: The input token indices are passed through a token embedding layer to obtain token representations. We also compute positional embeddings of shape `(1,T,C)` to encode token positions. These embeddings are added together to form the input to the transformer blocks.
+Step 3 Transformer Blocks: The input is passed sequentially through a stack of TransformerBlocks. Each block applies self-attention and feedforward layers with residual connections and layer normalization.
+Step 4 Output Layers: After the blocks, a final LayerNorm is applied. The result is passed through a linear projection (the language modeling head) to obtain logits over the vocabulary for each position. This method defines the full forward computation of the model, enabling training and inference. 
+
+Match Hugging Face code (right side)
+Hugging Face code
+```
+from transformers import pipeline, set_seed
+generator = pipeline(“text-generation”, model=‘gpt2’)
+set_seed(42)
+generator(“Hello, I’m a language model,” max_length=30, num_return_sequences=5)
+```
+Step 1 Initialize model (equivalent to pipeline(“text-generation”,model=‘gpt2’)
+
+```
+max_return_sequences = 5
+max_length = 30
+model = GPT.from_pretrained(‘gpt2’) # Load retrained model weights 
+model.eval() # probably will have no effect here, Set model to evaluation mode (may not affect inference here)
+model.to('cuda') # Move model to GPU for faster computation
+```
+
+Step 2 Create Input Tokens (equivalent to prompt: “Hello, I’m a language model,”)
+
+```
+import tiktoken
+cnc = tiktoken.get_encoding(‘gpt2’) # Load GPT-2’s tokenizer
+tokens = enc.encode(“Hello, I’m a language model.”) # Tokenize input text
+tokens = torch.tensor(tokens, dtype=torch.long) # Convert to tensor of shape (seq_len,) in this case, (8,).
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # Duplicate prompt for each sequence: (5, seq_len) i.e., (5,8), 
+x = tokens.to('cude') # Move tokens to GPU; these will be passed into the model
+```
+
+Generate
+This loop grows the input sequence `x` token by token using top-k sampling (with `k=50`). In every iteration of the loop we will be adding a column of new indices into each one of these rows. With each loop iteration we get one more column.
+
+```
+# generate right now x is (B, T) where B = S, T = B
+# set the seed to 42
+Torch.manual_seed(42) #ensures reproducibility by setting the random seed 
+while x.size(1) < max_length:
+	# forward the model to get the logits
+	with torch.no_grad():
+		logits = model(x)		
+		#the model outputs logits of shape (B,T, vocab_size). Since we only want to sample the next token, we focus on the logits at the last time step.
+		logits = logits[:, -1, :]
+		# Apply softmax to get a probability distribution over the vocabulary
+		probs = F.softmax(logits, dim=-1)
+		# Limit choices to the top 50 most probable tokens. Do top-k sampling of 50 (higgingface pipeline default). topk_probs here becomes (5, 50), topk_indices is (5, 50)
+		topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+		# Randomly sample from the top-k probabilities
+		ix = torch.multinomial(topk_probs, 1) # (B,1)
+		col = torch.gather(topk_indices, -1, ix) # (B,1)
+		# Concatenate the sampled token to the input sequence
+		x = torch.cat((x,xcol),dim=1)
+```
+
+Auto detect device availability
+Ensure model utilizes the fasted supported hardware available on your system. Detect the best available device for computation. Use cuda if available (for NVIDIA GPUs), otherwise check for MPS, which is Apple’s Metal Performance Shaders backend optimized for Apple Silicon GPUs. If neither is available, default to CPU.
+
+```
+device = “cpu”
+If torch.cuda.is_available():
+	device = “cuda”
+Else if hasattr(torch.backends, “mps”) and torch.backends.mps.is_available():
+	device = “mps”
+print(f”using device: {device}”)
+```
+
+### Tiny Shakespeare Dataset
+To train the model, we need a a dataset. Andrej recommends using the Tiny Shakespeare dataset, which is a popular, simple dataset for language modeling. It can be downloaded from this URL: `https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt`. The dataset contains: ~40,000 lines, ~200,000 words, ~1M bytes or characters (since it’s ASCII-only, each byte corresponds to one character).
+
+### Tokenizing the Dataset
+To prepare the data for training, we need to tokenize it using the same encoding that GPT-2 uses. This is done with the `tiktoken` library, which provides access to the GPT-2 tokenizer. This step converts the raw text into a sequence of integer tokens, which are the input format required for training the model.
+ Here’s how to encode the dataset:
+```
+import  tiktoken
+enc = tiktoken.get_encoding(‘gpt2’)
+tokens = enc.encode(data)
+print(tokens[:24])
+```
+
+### Creating a B x T Tensor to be fed into forward
+Andrej prefers working with long sequences and processes them in 2D as batches of time steps. To train the model, we construct input (`x`) and target (`y) tensors from a 1D stream of tokens. We start by loading a buffer of `BxT+1` tokens. The extra token (+1) ensures we have a valid target (ground truth) for every input token. From this buffer, we construct: `x`: the input to the model, `y`: the target labels (same shape as `x`, but shifted by one position). For example, suppose `tokens` is a 1D sequence of 25 elements. If we reshape it into 4 sequences of 6 time steps (i.e., `B=4`, `T=6`), then the following code block gives us `x` and `y` each of shape `(4,6)` where `y[i,j]` is the expected next token for `x[I,j]`.
+
+```
+import torch
+buf = torch.tensor(tokens[:24+1]) # +1 for the ground truth of the last token
+x = buf[:-1].view(4,6) # everything up to but not including the last token
+y = buf[1:].view(4,6) # skip the first element
+print(x)
+```
+
+### Getting logits and loss
+At this point, we can modify the model’s forward pass to return not only the logits but also the loss, making training easier.
+
+First, instantiate the model and move it to the appropriate device:
+```
+model = GPT(GPTConfig())
+model.to(device)
+logits, loss = model(x, y)
+```
+
+Next, update the `forward` method of the model to optionally compute and return the loss if target labels `y` are provided.
+```
+def forward(self, idx, **targets=None**):
+…
+**loss = None
+If targets is not None:
+	loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))**
+…
+return logits, **loss**
+
+This approach allows the same forward function to be used during both training (when targets are available and loss is needed) and inference (when only logits are needed).
+
+### Applying optimization
+To train the model, we use an optimizer - specifically, the AdamW optimizer provided by PyTorch. While SGD (Stochastic Gradient Descent) is a common baseline, Adam is often preferred because it adapts the learning rate for each parameter, making training more efficient and stable. AdamW is a corrected version of Adam that properly decouples weight decay from the gradient update, which Andrej mentions is effectively a “bug fix”.
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+for i in range(50):
+	optimizer.zero_grad() # clear previous gradients (i.e., zero gradients)
+	logits, loss = model(x, y) # forward pass: compute predictions and loss
+	loss.backward() # backward pass: compute gradients
+	optimizer.step() # update model parameters
+	print(f”step {i}, loss: {loss.item()}”) # Convert scalar tensor to Python float for printing
+
+The `loss.item()` call extracts the scalar value from the loss tensor (which may reside on the GPU depending on what’s configured to be used for training) and brings it to the CPU as a standard Python float. This is helpful for logging or visualization during training.
+
+### Dataloader Lite
+After overfitting a single batch, the next step is to optimize across the entire dataset. For this, we need a data loader that continuously serves fresh `(x,y)` training batches instead of repeating the same one. The `DataLoaderLite` class handles this. It uses `tiktoken` to tokenize the full contents of a text file into a flat list of token IDs, stores them in memory as a PyTorch tensor, and prints the total token count along with he number of batches per epoch (defined as how many distinct batches of size `B x T` can be extracted before wrapping around). The data loader starts at position 0 and steps through the token tensor in chunks of `B x T`, advancing the position by exactly `BxT` each time. However, when fetching a chunk, it takes `B x T + 1` tokens to ensure we can construct both the input `x` and the target `y` by shifting the sequence one token forward. If fetching the next batch would go out of bounds, it resets the position to 0 and wraps around.
+
+### Parameter sharing wte and lm_head
+In this section, Andrej points out a subtle but important detail about GPT-2’s training: parameter sharing (or weight tying) between the input and output embeddings. When loading retrained weights from Hugging Face, it’s easy to overlook that `transformer.wte.weight` and `lm_head.weight` are not just similar - they are exactly the same tensor.
+
+```
+# These tensors have the same shape:
+print(sd_hf[“lm_head.weight”].shape) # [50257, 768] - the output projection (logits layer)
+print(sd_hf[“transformer.wte.weight”].shape) # [50257, 768] - the token embedding layer
+
+But more than just having the same shape, they are identical at the memory level:
+
+```
+# All values are equal
+(sd_hf[“lm_head.weight”] == sd_hf[“transformer.wte.weight”]).all()
+
+# Data pointers match - they share memory
+print(sd_hf[“lm_head.weight”].data_ptr())
+print(sd_hf[“transformer.wte.weight”].data_ptr())
+```
+
+This is a common and intentional design choice known as weight tying. It was popularized in the Attention Is All You Need paper and earlier work like Using the Output Embedding to Improve Language Models (2017). As the Transformer paper states: “ We share the same weight matrix between the two embedding layers and the pre-softmax linear transformation…”
+
+The intuition, as Andrej explains, is that similar tokens should be treated similarly both at the input and output ends of the model. If two tokens are semantically or morphologically close - for example, lowercase and uppercase versions of the same word - we’d expect them to have nearby vectors in both the input embedding space and the output logits space. That symmetry motivates sharing the weights across the embedding and output projection layers.
+
+To fix the code and properly implement this, we explicitly tie the weights. This ensures that only one tensor is used in both places, reducing redundancy and saving parameters.
+
+```
+# Weight sharing scheme
+self.transformer.wte.weight = self.lm_head.weight
+```
+
+It matters because it improves generalization and parameter efficiency. Shared weights help the model maintain consistency between how it reads and generates tokens. Tying the weights removes the need for a separate output projection matrix. Since the embedding matrix is of shape `[50257, 768]`, this saves about 40 million parameters - roughly 30\% of the model’s total parameter count.
+
+### Model Initialization: std 0.02, residual unit
+The GPT-2 and GPT-3 papers don’t go into much detail about weight initialization, but the official GPT-2 implementation provides some insight. By examining `model.py`, we can infer how the weights are initialized.
+
+Specifically:
+Linear layer weights are initialized from a normal distribution with mean 0 and standard deviation 0.02.
+Biases are initialized to zero, overriding PyTorch’s default (which is typically uniform).
+Token embeddings (`wte`) and positional embeddings (`wpe`) are both initialized using `std=0.02` (even though GPT-2’s code uses `std=0.01` for positional embeddings, we follow 0.02 for simplicity and consistency). 
+
+This kind of initialization helps maintain stable gradients early in training, especially in deep models with residual connections like GPT-2.
+
+To apply this scheme across the whole model, the following line is added at the end of the `GPT` class’ `__init__` method:
+
+```
+self.apply(self._init_weights)
+```
+
+This calls `nn.Module.apply` which recursively visits every submodule (like `nn.Linear`, `nn.Embedding`) and applies a custom initialization function.
+
+Here’s how the `_init_weights` method should look. There is a check for the existence of `bias` before trying to initialized it. Not all linear layers have bias terms (e.g., sometimes for projection layers).
+
+```
+def _init_weights(self, module):
+	if isinstance(module, nn.Linear):
+		torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+		if module.bias is not None:
+			torch.nn.init.zeros_(module.bias)
+	elif isinstance(module, nn.Embedding):
+		torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+```
+
+Typically, when initializing weights in neural networks, a common heuristic is to use a standard deviation proportional to: 1/sqrt(fan_in) where fan_in is the number of input features to a layer. This approach, often called Xavier or He initialization (depending on specifics), helps keep the variance of activations stable across layers. For GPT-2’s model dimension d_model of 768, this formula suggests: 1/sqrt(768) ≈ 0.036. For larger GPT variants with d_model around 1600: 1/sqrt(1600) ≈ 0.025. The GPT-2 implementation uses a fixed std = 0.02 which falls comfortably within this ballpark. While it’s a fixed hyper parameter rather than dynamically computed from the model size, it’s not an unreasonable choice:
+it’s slightly smaller than 1/sqrt(768) which can help training stability
+It’s roughly consistent with larger hidden sizes (e.g., 1600)
+fixing the std keeps initialization simple and reproducible
+
+In the GPT-2 paper, there’s a line that says: “A modified initialization which accounts for the accumulation on the residual path with model depth is used. We scale the weights of residual layers at initialization by a factor of 1/sqrt(N) where N is the number of residual layers.”
+
+Andrej elaborates on why this scaling is necessary. In a Transformer, the residual stream (i.e., the output passed through the layers) is updated in a pattern like this: `x = x + something`.
+
+Each block adds a bit to the stream, so over many layers, the contributions accumulate. If we’re not careful, the variance of the residual activations can grow significantly as more layers are added.
+
+```
+x = torch.zeros(768)
+n = 100 
+for I in range(n):
+	x += torch.randn(768)
+
+print(x.std()) # Outputs ~10
+``` 
+
+Here, because we add `n` random vectors (each with std ≈ 1), the resulting standard deviation `x` grows like sqrt(n) - about 10 when `n=100`. To counteract this accumulation, GPT-2 scales each residual contribution down by `1/sqrt(n)` so that the total variance stays constant:
+
+```
+x = torch.zeros(768)
+n = 100 
+for i in range(n):
+	x += n**-0.5 * torch.randn(768)
+
+print(x.std()) # Outputs ~1
+```
+
+In the `CausalSelfAttention` and `MLP` class, the following is added in their `__init__` methods in order to implement this:
+
+```
+self.c_proj.NANOGPT_SCALE_INIT = 1
+```
+This flag indicates that the module should use scaled initialization.
+Then, in the `GPT` class where parameters are initialized, there is a check for this flag. By default, weights are initialized with standard deviation `std=0.02` But if the module has the `NANOGPT_SCALE_INIT` attribute, there is an adjustment by dividing `std` by `sqrt(num_layers)`.
+
+### Tensor Cores
+Tensor Cores are specialized hardware instructions in NVIDIA’s A100 GPU architecture designated to accelerate matrix multiplication operations. Specifically, they perform small 4x4 matrix multiplications very efficiently. Since most of the computation in a transformer model like GPT-2 is dominated by matrix multiplications - especially within the linear layers - Tensor Cores play a critical role in speeding things up.
+
+While there are other operations such as residual additions and nonlinearities (like GELUs), these are relatively insignificant in terms of computational cost. In the 124M parameter GPT-2 model, the most expensive operation by far is the final classification layer - a large matrix multiplication from 768 to 50,257 dimensions. This single operation dwarfs all others in terms of computational load.
+
+Tensor Cores help accelerate these matrix multiplications dramatically. For instance, using FP32 (32-bit floating point), they can provide up to an 8x speedup. However, this speedup comes with a trade-off: a slight reduction in precision. Although the inputs, outputs, and accumulations are in FP32, the internal operations may use reduced precision to boost performance. This makes the results slightly more approximate.
+
+In practice, though, this approximation is negligible - training results remain virtually unaffected. That’s why Andrej favors using FP32 with Tensor Cores. The slight precision loss is often imperceptible, and the performance gains are substantial and essentially “free,” as this optimization happens entirely under the hood without requiring changes to your code. It’s a sweet spot in performance vs. accuracy.
+
+### Torch.Compile
+In this section, Andrej introduces `torch.compile`, a powerful optimization feature from the PyTorch team. It acts like a compiler for your neural network code - similar to how GCC compiles C/C++ - and can dramatically speed up training and inference by reducing Python overhead and optimizing GPU usage. Using `torch.compile` is extremely simple. You wrap your model in a single line: 
+
+```
+model = torch.compile(model)
+```
+
+The trade-off is a small upfront compilation time, but the payoff is significantly faster runtime. Andrej emphasizes there’s rarely a good reason not to use it - it’s becoming the default way to run PyTorch models efficiently. The performance gains come from two main optimizations:
+
+Python Overhead Removal: The model is compiled into a single, optimized object that no longer relies on the Python interpreter during execution.
+GPU Kernel Fusion: Instead of sending data to the GPU for each individual operation, `torch.compile` combines (or “fuses”) multiple element-wise operations into a single kernel. This minimizes costly memory read/write operations between the CPU and GPU - a major bottleneck in deep learning workloads.
+
+As Andrej puts it, having the full view of the computation ahead of time lets the system plan smarter memory access patterns, which leads to better performance.
+
+### Flash Attention
+While `torch.compile` is a powerful tool for optimizing PyTorch code, it doesn’t catch every possible optimization. One notable example is FlashAttention, introduced in the 2022 Stanford paper “FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness”. FlashAttention is a highly optimized algorithm for computing attention, designed to be significantly faster and more memory-efficient than the standard approach. In the traditional implementation of attention, we typically write:
+
+```
+att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k..size(-1)))
+att = att.masked_fill(self.bias(:,:,:T,:T) == 0, float(‘inf’))
+att = F.softmax(att, dim=-1)
+y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+```
+This can be replaced with a single, highly optimized call to: 
+
+```
+y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+```
+This function leverages FlashAttention under the hood, which effectively fuses multiple operations into a single, efficient kernel. `torch.compile` cannot automatically discover this optimization because it requires a fundamental algorithmic rewrite of how attention is computed - not just standard kernel fusion. 
+
+What makes FlashAttention remarkable is its performance: although it performs more FLOPs than the naive implementation, it can be up to 7.6x faster, according to the paper. This speed up comes from being IO-aware: it minimizes the number of reads and writes to high-bandwidth memory (HBM) by carefully managing on-chip resources like shared memory. Unlike the naive approach, it avoids materializing the full N x N attention matrix in HBM, which drastically improves memory efficiency and throughput.
+
+### Nice/ugly numbers
+Andrej talks about “nice” and “ugly” numbers - terms that refer to how well a number plays with hardware like GPUs. Nice numbers are typically powers of 2, such as 64 or 128. These are preferred because many deep learning operations (especially on CUDA) are optimized for them. Ugly numbers, like 9 or 13, don’t align well with this structure and can cause inefficiencies. 
+
+One example of an ugly number in the code is the original `vocab_size` of 50,257. It’s an odd number and not particularly friendly for CUDA’s tile/block computation structure. A better alternative would be rounding it up to something like 50,304 which is a “nicer” number - closer to a multiple of 64. While this technically increases the number of computations, it often results in faster execution because the hardware is optimized for handling such sizes efficiently.
+
+CUDA kernels typically operate on chunks (or tiles) of size 32, 64, etc. If your data doesn’t neatly fit into these chunks, extra boundary-handling logic gets triggered, which is slower. By padding your inputs to a nice number, you avoid this and allow CUDA to process everything in clean, efficient blocks.
+
+This seemingly small change - just rounding up to a nice number - can lead to around a 4\% speedup. Interestingly, this is the kind of low-level performance detail that `torch.compile` doesn’t catch, showing that manual optimization still has its place.
+
+### GPT-3 vs GPT-2 Key Differences
+The GPT-3 paper provides more detailed insights into the training process compared to GPT-2. However, unlike GPT-2, the weights for GPT-3 have not been publicly released. Architecturally, GPT-3 and GPT-2 are very similar, with the main difference being an increased context window: GPT-3 uses a context length of 2048 tokens, compared to GPT-2’s 1024. GPT-3 is also dramatically larger, scaling up from GPT-2’s 1.5 billion parameters to 175 billion, and was trained on a significantly more diverse and expansive dataset. 
+
+Other important distinctions include:
+- Training Data: ~570GB of filtered text data vs ~40GB.
+- Scale Efficiency: GPT-3 demonstrated that simply scaling up model size, data, and compute - without major architectural changes - can lead to strong performance improvements on a wider range of NLP tasks.
+- Few-Shot Learning: GPT-3’s increased size and training diversity enabled it to perform much better at a few-shot and zero-shot learning compared to GPT-2, which typically required fine-tuning to perform well on downstream tasks.
+- Layer Normalization Placement: GPT-3 reportedly uses pre-layer normalization (as opposed to GPT-2’s post-layer norm), which improves training stability at large scale.
+- No Weight Sharing: Unlike some earlier models, GPT-3 does not share weights between layers or between the embedding and output layers.
+
+Despite these advancements, GPT-3 remains a decoder-only transformer like GPT-2, and both models are autoregressive.
+
+### Gradient Clipping
+To prevent exploding gradients, we clip the global norm of the gradients to a maximum value of 1.0. After calling `loss.backward()`, the gradients are stored in the `.grad` attributes of the model’s parameters. Sometimes, especially in deep networks, these gradients can become too large and destabilize training. Gradient clipping helps keep them in check by scaling them down if their total norm exceeds a specified threshold.
+
+In PyTorch, this is commonly done with the following utility function:
+```
+norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+```
+
+This clips the gradients of all model parameters to ensure their global norm doesn’t exceed 1.0, while preserving their direction as much as possible.
+
+Learning Rate Scheduler
+The learning rate scheduler used in this tutorial is based on a technique called cosine decay with warm-up. This means the learning rate starts at zero and increases linearly during a warm-up phase. After reaching a peak, it decays following a cosine-shaped curve back down to zero.
+
+In the GPT-3 paper, the authors describe a similar strategy: “We use cosine decay for the learning rate down to 10\% of its value, over 260 billion tokens (after 260 billion tokens, training continues at 10\% of the original learning rate).” 
+
+However, the implementation in this tutorial differs slightly. In GPT-3, the decay phase ends before the total number of training steps, with the learning rate plateauing at 10\% for the remainder. In contrast, the tutorial’s implementation decays all the way to zero, with the decay duration equal to the total number of training steps.
+
+### Batch Size Schedule
+In the GPT-3 paper, a gradual batch size increase is used - starting with a small batch size and linearly ramping it up over time. This technique helps with system throughput and stability during training, especially at scale.
+
+However, Andrej chooses to skip this approach in his GPT-2 reproduction tutorial. He avoids dynamic batch sizing because it complicates the arithmetic of training - specifically, it changes the number of tokens processed per optimization step, making things less transparent. He prefers to keep the setup simple and focused on core concepts.
+
+Moreover, Andrej argues that gradually increasing batch size is not an algorithmic optimization improvement (i.e., it does not fundamentally improve how the model learns) but rather a system-level or training-speed optimization. In the early stages of training, when the model is still in a relatively naive state, it primarily learns broad token frequencies and simple biases - such as which tokens to ignore. During this phase, gradients from different examples tend to be highly correlated, making large batch sizes inefficient.
+
+Only later in training, when gradients become more de-correlated and nuanced, does a larger batch size provide more statistical benefit. So, in his simplified setup, Andrej opts for a constant batch size, keeping the implementation straightforward while still capturing the essence of model training.
+
+### Weight Decay
+Weight decay is used in all models as a form of regularization. In Andrej’s implementation, a weight decay value of 0.1 is used, which is 10x larger than the default 0.01 used in the AdamW optimizer (as seen in models like GPT-3).
+
+The implementation involves splitting parameters into two groups: those that should be affected by weight decay and those that shouldn’t. Typically, biases and one-dimensional parameters - such as those used in LayerNorms, scaling factors, and biases - are excluded from weight decay. This is because it doesnt make conceptual sense to penalize those small-scale parameters. 
+
+Instead, weight decay is applied to the weights involved in matrix multiplications and embeddings, which are the primary contributors to the model’s capacity. Regularizing these weights helps prevent any single parameter from becoming excessively large. This encourages the network to distribute learning across multiple channels, leading to better generalization. Andrej describes this effect as a kind of “gravitational pull” on the weights, nudging them toward smaller magnitudes and preventing over-reliance on individual units.
+
+### FusedAdamW
+The implementation first checks if the `fused` optimizer is available, and uses it if so. By default, it’s not enabled because it’s still relatively new and needs more time to mature. When running on CUDA, `FusedAdamW` offers significant speedups. Normally, updating parameters involves looping over each tensor and launching a separate CUDA kernel for each, which adds overhead. `FusedAdamW` fuses these operations into a single kernel launch, reducing overhead and improving performance. In essence, it’s kernel fusion applied to the AdamW optimizer.
+
+### Gradient Accumulation
+Gradient accumulation allows us to simulate large batch sizes by splitting them into multiple smaller “micro-batches” that are processed sequentially. This is especially useful when working with limited GPU memory. For example, even if we want to simulate a total batch size of 524,288 tokens (~0.5M), we can still do it by running more steps and accumulating gradients across multiple forward and backward passes.
+
+Here is a simple setup used in the tutorial:
+```
+total_batch_size = 524288 # 2**19, ~.5M, in number of tokens
+B = 16 # micro batch size
+T = 1024 # sequence length
+Assert total_batch_size \% (B * T) == 0, “make sure total_batch_size is divisible by B * T”
+grad_accum_steps = total_batch_size // (B * T)
+print(f”total desired batch size: {total_batch_size}”)
+print(f”=> calculated gradient accumulate steps: {grad_accum_steps}”)
+```
+By default, `F.cross_entropy` uses ‘mean’ reduction, meaning it averages the loss over all `B*T` tokens in a micro-batch. However, when performing gradient accumulation, we need to scale the loss ourselves to ensure correct normalization. Dividing the loss by `grad_accum_steps` ensures that when we sum up gradients across steps (via `loss.backward()`), we’re correctly simulating the effect of a large batch that would have been processed all at once.
+
+Here is the loop with gradient accumulation:
+```
+for micro_step in range(grad_accum_steps):
+	x, y = train_loader.next_batch()
+	x, y = x.to(device, y.to(device)
+	with torch.autocast(device_type=device, dtype=torch.bloat16):
+		logits, loss = model(x,y)
+	loss = loss / grad_accum_steps # normalize loss across accumulation steps
+	loss.backward()
+```
+
+In summary, gradient accumulation gives the flexibility to train with arbitrarily large effective batch size by spreading the computation across multiple smaller, memory-friendly micro-batches, while still maintaining the correct gradient scale.
+
+### Distributed Data Parallel
+Distributed Data Parallel (DDP) allows training to be scaled across multiple GPUs by launching one process per GPU. In Andrej’s implementation, 8 GPUs are used, so `torchrun` launches 8 separate processes - each bound to a specific GPU. Each process runs the same training code independently but operates on a different subset of the data. Behind the scenes, PyTorch handles synchronizing the gradients across all GPUs by averaging them during the backward pass. This ensures all models stay in sync after each update, effectively simulating data-parallel training.
+
+### torchrun
+`torchrun` is a utility that simplifies launching distributed training jobs. When executed, it spawns multiple processes (one per GPU) and sets important environment variables so that each process knows its role in the distributed setup. Specifically, `torchrun` sets:
+- `RANK`: The global rank (unique ID) of the process across all nodes.
+- `LOCAL_RANK`: The rank of the process on the local machine (used to bind to the correct GPU).
+- `WORLD_SIZE`: The total number of processes participating in training.
+
+These environment variables are used internally by PyTorch’s DDP to coordinate communication and gradient synchronization among all processes.
+
+### Datasets Used In GPT-3
+In the GPT-3 paper, the authors explain that they created a new web scraper focused on high-quality documents. Instead of scraping the entire web indiscriminately, they filtered for pages that had already been curated by humans. As a practical heuristic, they scraped all outbound links from Reddit posts that had received at least 3 karma - under the assumption that links upvoted by users were likely to be interesting, informative, or entertaining. This dataset, however, was not publicly released. An open-source effort to replicate it is called OpenWebText.
+
+For his GPT-2 (124M) reproduction tutorial, Andrej Karpathy uses a dataset called FineWeb, which is based on Common Crawl data. FineWeb is filtered and preprocessed to emphasize high-quality content. Hugging Face released versions of FineWeb containing up to 1.3 trillion tokens of educational content and 5.4 trillion tokens of “highly educational” content. In Andrej’s implementation, he uses a specific subset of FinWeb named `sample-10BT`, which is a randomly sampled corpus containing around 10 billion GPT-2 tokens from the larger dataset.
+
+### Validation Data Split
+A `val_loader` is created by passing `split=“val”` to the data loader, which gives us access to the validation shard of the dataset. To support this, a `reset(self)` method is added to the `DataLoaderLite` class and called within its `__init__`. This method reinitializes the loader’s internal state, ensuring it starts fresh for each validation pass.  
+
+During training, at every 100th iteration (including the 0th), the model is switched to evaluation mode. The `val_loader` is reset and validation loss is computed without gradient tracking. The loss is accumulated over, say, 20 steps and then averaged. This logic mirrors the training loop, except it skips `loss.backward()` - it’s pure inference, used solely to track validation performance. 
+
+In PyTorch (and most deep learning frameworks), the typical training loop has three main steps:
+1. Forward pass - Compute the model’s output (logits) from the input.
+2. Loss computation - Calculate how wrong the predictions are.
+3. Backward pass - Call `loss.backward()` to compute gradients.
+4. Optimizer step - Update model weights based on gradients
+
+When you’re doing inference (i.e., just evaluating the model, not training it), you only care about steps 1 and 2 - you want to know how well the model is doing and you do not want to compute gradients or update weights. By skipping `loss.backward()` you’re skipping the gradient computation step, which is a hallmark of training. That’s why it’s called inference - you’re just running the model to observe its predictions or performance, not trying to make it better at anything in that moment. To optimize this further during validation/inference, we also wrap the code in: `with torch.no_grad():` which tells PyTorch: don:t build the computation graph, don’t track operations for gradients, and use less memory and compute.
+
+### Sampling Revive
+The sampling code should look familiar, but there’s a key change: a dedicated PyTorch `Generator` object is now used for sampling. This allows for direct control over the random number generation process, ensuring that sampling does not interfere with the global RNG state used during training. To achieve this separation, a special RNG is created solely for sampling, and it is explicitly seeded so that each process (or rank) receives a different seed. This generator is then passed to the `torch.multinomial` function, which handles the actual sampling.
+
+One caveat: the model runs slightly slower because this setup is currently incompatible with `torch.compile`. Attempting to use `torch.compile` may result in a PyTorch error, though this issue might have been resolved by the time Andrej committed his code to GitHub.
+
+### HellaSwag
+HellaSwag is a multiple-choice sentence completion dataset designed to test a model’s ability to reason about everyday situations. Each example provides a short context, followed by four possible continuations. For instance, given a context like:
+
+“A woman is outside with a bucket and a dog. The dog is running around trying to avoid a bath. She…”
+A. Rinses the bucket of the soap and blow dries the dog’s head.
+B. Uses a hose to keep it from getting soapy.
+C. Gets the dog wet, then it runs away again.
+D. Gets into a bathtub with the dog.
+
+Only one of these options is the correct, natural continuation. The remaining choices are adversarially generated - they are syntactically plausible and often grammatically correct, but semantically or logically off. This makes them deceptively difficult for language models to distinguish, even though humans can easily pick the right answer. 
+
+The dataset pulls its sentence contexts from sources like ActivityNet and WikiHow, covering a broad range of everyday domains such as “Home and Garden”, “Computers and Electronics” etc. The paper includes a helpful diagram showing the diversity of topics from WikiHow.
+
+The key idea is that well-trained models with strong world knowledge should perform well, while weaker models will struggle with the subtle distinctions. HellaSwag is therefore a useful benchmark for evaluating a model’s common sense reasoning abilities. 
+
+### Token Completion
+Andrej evaluates the model using a token completion approach rather than a traditional multiple-choice format. The problem with multiple-choice for this small model is that it likely doesn’t understand the concept of associating a label (like A, B, C, or D) with one of the options. Instead, the model is tested in its native form: predicting token sequences.
+
+To do this, a batch is constructed with 4 rows (one for each option) and T tokens (the length varies). The shared context - the initial prompt common to all options - is repeated across all rows. Then, each row appends one of the four candidate completions, with exactly one correct option (e.g., option 3). Since the options might be of different lengths, the batch length is set to the longest option, and shorter options are padded. A mask is created to indicate which tokens are valid (mask=1) and which are padding (mask=0).
+
+During evaluation, the language model computes the probabilities of each token in each option. We then calculate the average token probability for each option and select the one with the highest average probability as the model’s predicted completion. This effectively turns the multiple-choice problem into a token completion scoring task. 
+
+Andrej believes this is similar to how GPT-3 handles HellaSwag. However, some implementations of HellaSwag treat it as a classic multiple-choice task, where the model sees the context once and all options simultaneously-allowing it to compare choices directly. This is an easier task, but requires larger models with greater capacity. Since Andrej’s model is small, it evaluates each option independently without access to the others, making the task more challenging.
+
+### Checkpointing
+After evaluating the validation loss, the master process logs the result and saves a checkpoint every 5000 steps (for Andrej’s implementation). A checkpoint includes the model’s state dictionary, which allows you to save and later resume training or perform evaluations.
+
+In addition to the model state, the optimizer state dictionary must also be saved. This is important because optimizers like Adam maintain internal buffers (e.g., the first and second moment estimates, `m` and `v`), which are essential for correct resumption of training. In the context of the Adam optimizer, `m` and `v` refer to moving averages of the gradients, which help the optimizer adaptively adjust the learning rate for each parameter. `m` represents the first moment estimate, which is essentially the exponentially decaying average of past gradients. It captures the direction the gradients are pointing on average. `v` represents the second moment estimate, the exponentially decaying average of the squared gradients. It captures how large the gradients are on average (their variance).
+
+Care should also be taken to preserve RNG seeds to ensure reproducibility when resuming training.
+
+Checkpointing is useful not only for continuing training but also for performing more rigorous evaluations. For instance, instead of the quick HellaSwag evaluation used in the tutorial, you could use a more comprehensive evaluation framework like the Eleuthera Evaluation Harness.
+
+### llm.c
+LLMs in simple, pure C/CUDA with no need for 245MB of PyTorch of 107MB of cPython. Current focus is on retraining, in particular reproducing the GPT-2 and GPT-3 miniseries, along with a parallel PyTorch reference implementation in `train_gpt2.py`. 
+
+`llm.c` is faster than our implementation in regards to start up and getting to stepping and it is faster per step, so overall it is faster.
+
+
